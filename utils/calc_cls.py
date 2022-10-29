@@ -5,7 +5,7 @@ import pandas as pd
 import xml.etree.ElementTree as ET
 import pickle
 
-path = r'E:\file\Code\Python\datasets\merged\val\labels'
+path = r'E:\file\Code\Python\datasets\worksuit\val\labels'
 classes = {'xy': 1, 'wcaqm': 2, 'wcgz': 3, 'aqmzc': 4, 'gzzc': 0}
 calc_cls = {1: 0, 2: 0, 3: 0, 4: 0, 0: 0}
 
