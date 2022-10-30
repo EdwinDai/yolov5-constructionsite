@@ -849,3 +849,66 @@ class Classify(nn.Module):
         if isinstance(x, list):
             x = torch.cat(x, 1)
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+
+
+class ChannelPool(nn.Module):
+    def forward(self, x):
+        return torch.cat((torch.max(x, 1)[0].unsqueeze(1), torch.mean(x, 1).unsqueeze(1)), dim=1)
+
+
+class SpatialGate(nn.Module):
+    def __init__(self):
+        super(SpatialGate, self).__init__()
+
+        self.channel_pool = ChannelPool()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels=2, out_channels=1, kernel_size=7, stride=1, padding=3),
+            nn.BatchNorm2d(1)
+        )
+        self.sigmod = nn.Sigmoid()
+
+    def forward(self, x):
+        out = self.conv(self.channel_pool(x))
+        return out * self.sigmod(out)
+
+
+class TripletAttention(nn.Module):
+    def __init__(self, ch1=2, spatial=True):
+        super(TripletAttention, self).__init__()
+        self.spatial = spatial
+        self.height_gate = SpatialGate()
+        self.width_gate = SpatialGate()
+        if self.spatial:
+            self.spatial_gate = SpatialGate()
+
+    def forward(self, x):
+        x_perm1 = x.permute(0, 2, 1, 3).contiguous()
+        x_out1 = self.height_gate(x_perm1)
+        x_out1 = x_out1.permute(0, 2, 1, 3).contiguous()
+
+        x_perm2 = x.permute(0, 3, 2, 1).contiguous()
+        x_out2 = self.width_gate(x_perm2)
+        x_out2 = x_out2.permute(0, 3, 2, 1).contiguous()
+
+        if self.spatial:
+            x_out3 = self.spatial_gate(x)
+            return (1 / 3) * (x_out1 + x_out2 + x_out3)
+        else:
+            return (1 / 2) * (x_out1 + x_out2)
+
+
+class C3_R2A(nn.Module):
+    # CSP Bottleneck with 3 convolutions
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
+        self.R2A = TripletAttention()
+
+    def forward(self, x):
+        c3result = self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+        return self.R2A(c3result)
+

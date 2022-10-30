@@ -14,6 +14,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
+
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[1]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
@@ -52,11 +53,14 @@ class Detect(nn.Module):
         self.register_buffer('anchors', torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
+        self.R2A = TripletAttention()
 
     def forward(self, x):
         z = []  # inference output
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
+            x[i] = self.R2A(x[i])
+            # print(x[i].shape)
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
@@ -316,13 +320,13 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in {
                 Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv,
-                BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x}:
+                BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, C3_R2A}:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
 
             args = [c1, c2, *args[1:]]
-            if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x}:
+            if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x, C3_R2A}:
                 args.insert(2, n)  # number of repeats
                 n = 1
         elif m is nn.BatchNorm2d:
@@ -355,6 +359,50 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         ch.append(c2)
     return nn.Sequential(*layers), sorted(save)
 
+class ChannelPool(nn.Module):
+    def forward(self, x):
+        return torch.cat((torch.max(x, 1)[0].unsqueeze(1), torch.mean(x, 1).unsqueeze(1)), dim=1)
+
+
+class SpatialGate(nn.Module):
+    def __init__(self):
+        super(SpatialGate, self).__init__()
+
+        self.channel_pool = ChannelPool()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels=2, out_channels=1, kernel_size=7, stride=1, padding=3),
+            nn.BatchNorm2d(1)
+        )
+        self.sigmod = nn.Sigmoid()
+
+    def forward(self, x):
+        out = self.conv(self.channel_pool(x))
+        return out * self.sigmod(out)
+
+
+class TripletAttention(nn.Module):
+    def __init__(self, ch1=2, spatial=True):
+        super(TripletAttention, self).__init__()
+        self.spatial = spatial
+        self.height_gate = SpatialGate()
+        self.width_gate = SpatialGate()
+        if self.spatial:
+            self.spatial_gate = SpatialGate()
+
+    def forward(self, x):
+        x_perm1 = x.permute(0, 2, 1, 3).contiguous()
+        x_out1 = self.height_gate(x_perm1)
+        x_out1 = x_out1.permute(0, 2, 1, 3).contiguous()
+
+        x_perm2 = x.permute(0, 3, 2, 1).contiguous()
+        x_out2 = self.width_gate(x_perm2)
+        x_out2 = x_out2.permute(0, 3, 2, 1).contiguous()
+
+        if self.spatial:
+            x_out3 = self.spatial_gate(x)
+            return (1 / 3) * (x_out1 + x_out2 + x_out3)
+        else:
+            return (1 / 2) * (x_out1 + x_out2)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
